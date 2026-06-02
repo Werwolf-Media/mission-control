@@ -285,11 +285,28 @@ function getLocalHermesSessions() {
   try {
     const rows = scanHermesSessions(100)
 
+    // Werwolf-Media fork patch (Patch 7): map Hermes profile -> MC workspace.
+    // Convention: profile name == workspace slug. Lookup once, reuse per session.
+    const profileToWorkspace = new Map<string, { id: number; slug: string; name: string }>()
+    try {
+      const db = getDatabase()
+      const wsRows = db.prepare('SELECT id, slug, name FROM workspaces').all() as Array<{ id: number; slug: string; name: string }>
+      for (const ws of wsRows) profileToWorkspace.set(ws.slug, ws)
+    } catch { /* db lookup optional */ }
+
     return rows.map((s) => {
       const total = s.inputTokens + s.outputTokens
       const lastMsg = s.lastMessageAt ? new Date(s.lastMessageAt).getTime() : 0
       const firstMsg = s.firstMessageAt ? new Date(s.firstMessageAt).getTime() : 0
       const effectiveLastActivity = s.isActive ? Date.now() : lastMsg
+      const profile = s.profile || 'default'
+      const ws = profileToWorkspace.get(profile)
+
+      // Build flags: include source + profile tag for UI filtering
+      const flags: string[] = []
+      if (s.source && s.source !== 'cli') flags.push(s.source)
+      if (profile && profile !== 'default') flags.push(`profile:${profile}`)
+
       return {
         id: s.sessionId,
         key: s.title || s.sessionId,
@@ -299,7 +316,7 @@ function getLocalHermesSessions() {
         model: s.model || 'hermes',
         tokens: `${formatTokens(s.inputTokens)}/${formatTokens(s.outputTokens)}`,
         channel: s.source || 'cli',
-        flags: s.source && s.source !== 'cli' ? [s.source] : [],
+        flags,
         active: s.isActive,
         startTime: firstMsg,
         lastActivity: effectiveLastActivity,
@@ -311,6 +328,11 @@ function getLocalHermesSessions() {
         lastUserPrompt: s.title || null,
         totalTokens: total,
         workingDir: null,
+        // Werwolf-Media fork patch: surface profile + workspace mapping
+        profile,
+        workspace_id: ws?.id ?? null,
+        workspace_slug: ws?.slug ?? null,
+        workspace_name: ws?.name ?? null,
       }
     })
   } catch (err) {

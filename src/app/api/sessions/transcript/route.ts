@@ -446,8 +446,39 @@ function readHermesTranscriptFromDbPath(dbPath: string, sessionId: string, limit
 }
 
 function readHermesTranscript(sessionId: string, limit: number): TranscriptMessage[] {
-  const dbPath = path.join(config.homeDir, '.hermes', 'state.db')
-  return readHermesTranscriptFromDbPath(dbPath, sessionId, limit)
+  // Werwolf-Media fork patch (Patch 8): scan root + all profile subdirs.
+  // Upstream only checked homeDir/.hermes/state.db which is /nonexistent in Docker
+  // AND ignores multi-profile setups. Try each candidate, return first non-empty.
+  const fs = require('node:fs')
+  const dataDir = path.resolve(config.dataDir || '.data')
+  const homeDir = config.homeDir || process.env.HOME || ''
+
+  const roots: string[] = []
+  if (homeDir && homeDir !== '/nonexistent') roots.push(path.join(homeDir, '.hermes'))
+  roots.push(path.join(dataDir, '.hermes'))
+  if (process.env.HERMES_HOME) roots.push(process.env.HERMES_HOME)
+
+  const candidates: string[] = []
+  for (const root of roots) {
+    candidates.push(path.join(root, 'state.db'))
+    const profilesDir = path.join(root, 'profiles')
+    try {
+      if (!fs.existsSync(profilesDir)) continue
+      for (const name of fs.readdirSync(profilesDir)) {
+        const p = path.join(profilesDir, name)
+        try {
+          if (fs.statSync(p).isDirectory()) candidates.push(path.join(p, 'state.db'))
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+  }
+
+  for (const dbPath of candidates) {
+    if (!fs.existsSync(dbPath)) continue
+    const messages = readHermesTranscriptFromDbPath(dbPath, sessionId, limit)
+    if (messages.length > 0) return messages
+  }
+  return []
 }
 
 /**
