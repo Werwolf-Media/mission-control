@@ -27,6 +27,10 @@ export interface HermesSessionStats {
   firstMessageAt: string | null
   lastMessageAt: string | null
   isActive: boolean
+  // Werwolf-Media fork patch: profile/tenant identifier so multi-tenant
+  // setups can route sessions to MC workspaces. Empty/'default' for the
+  // root profile, otherwise the directory name under .hermes/profiles/.
+  profile: string
 }
 
 interface HermesSessionRow {
@@ -143,11 +147,50 @@ export function isHermesInstalled(): boolean {
 }
 
 function hasHermesStateDb(): boolean {
-  // Check all candidate roots, not just homeDir/.hermes (which is /nonexistent
-  // in default Docker setups). Werwolf-Media fork patch.
-  return getHermesDataRoots().some(root => {
-    try { return existsSync(join(root, 'state.db')) } catch { return false }
-  })
+  // Check all candidate roots AND profile subdirs.
+  // Werwolf-Media fork patch — supports Hermes multi-profile layout
+  // (one state.db per profile under .hermes/profiles/<name>/).
+  return getAllHermesStateDbPaths().length > 0
+}
+
+/**
+ * Return every state.db file we can find — the root profile and every
+ * Hermes sub-profile under .hermes/profiles/*. Used for multi-tenant
+ * deployments where each MC workspace maps to a Hermes profile.
+ * Werwolf-Media fork patch.
+ */
+function getAllHermesStateDbPaths(): Array<{ path: string; profile: string }> {
+  const { readdirSync, statSync } = require('node:fs')
+  const results: Array<{ path: string; profile: string }> = []
+  const seen = new Set<string>()
+
+  for (const root of getHermesDataRoots()) {
+    // Root profile
+    const rootDb = join(root, 'state.db')
+    if (!seen.has(rootDb)) {
+      try { if (existsSync(rootDb)) { results.push({ path: rootDb, profile: 'default' }); seen.add(rootDb) } }
+      catch { /* ignore */ }
+    }
+
+    // Profiles directory
+    const profilesDir = join(root, 'profiles')
+    try {
+      if (!existsSync(profilesDir)) continue
+      for (const name of readdirSync(profilesDir)) {
+        try {
+          const profileDir = join(profilesDir, name)
+          if (!statSync(profileDir).isDirectory()) continue
+          const dbPath = join(profileDir, 'state.db')
+          if (seen.has(dbPath)) continue
+          if (existsSync(dbPath)) {
+            results.push({ path: dbPath, profile: name })
+            seen.add(dbPath)
+          }
+        } catch { /* skip unreadable entries */ }
+      }
+    } catch { /* profiles dir missing — fine */ }
+  }
+  return results
 }
 
 function parseGatewayPid(raw: string): number | null {
@@ -176,31 +219,41 @@ function parseGatewayPid(raw: string): number | null {
 }
 
 export function isHermesGatewayRunning(): boolean {
-  const pidPath = getHermesPidPath()
-  if (!existsSync(pidPath)) return false
+  // Werwolf-Media fork patch: check root profile + every Hermes sub-profile.
+  // Returns true if ANY gateway has both pidfile + lockfile (or process is live).
+  const path = require('node:path')
+  const candidates: string[] = []
 
-  try {
-    const pidStr = readFileSync(pidPath, 'utf8')
-    const pid = parseGatewayPid(pidStr)
-    if (!pid) return false
-
-    // Try direct process check (works when Hermes runs in the same PID namespace
-    // as MC — i.e. classic local install).
+  for (const root of getHermesDataRoots()) {
+    candidates.push(join(root, 'gateway.pid'))
+    const profilesDir = join(root, 'profiles')
     try {
-      process.kill(pid, 0)
-      return true
-    } catch {
-      // Werwolf-Media fork patch: in Docker sidecar setup MC and Hermes live in
-      // separate PID namespaces, so process.kill(pid, 0) always fails. Fall back
-      // to checking the gateway.lock file in the same dir — Hermes removes both
-      // pidfile and lockfile on graceful shutdown, so both-present is a strong
-      // "running" signal. False positives only on abrupt container kills.
-      const lockPath = join(require('node:path').dirname(pidPath), 'gateway.lock')
-      return existsSync(lockPath)
-    }
-  } catch {
-    return false
+      if (!existsSync(profilesDir)) continue
+      const { readdirSync, statSync } = require('node:fs')
+      for (const name of readdirSync(profilesDir)) {
+        try {
+          const p = join(profilesDir, name)
+          if (statSync(p).isDirectory()) candidates.push(join(p, 'gateway.pid'))
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
   }
+
+  return candidates.some((pidPath) => {
+    if (!existsSync(pidPath)) return false
+    try {
+      const pidStr = readFileSync(pidPath, 'utf8')
+      const pid = parseGatewayPid(pidStr)
+      if (!pid) return false
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        const lockPath = join(path.dirname(pidPath), 'gateway.lock')
+        return existsSync(lockPath)
+      }
+    } catch { return false }
+  })
 }
 
 function epochSecondsToISO(epoch: number | null): string | null {
@@ -210,74 +263,83 @@ function epochSecondsToISO(epoch: number | null): string | null {
 }
 
 export function scanHermesSessions(limit = DEFAULT_SESSION_LIMIT): HermesSessionStats[] {
-  const dbPath = getHermesDbPath()
-  if (!existsSync(dbPath)) return []
+  // Werwolf-Media fork patch: iterate over every state.db we can find
+  // (root + each profile under .hermes/profiles/) and merge sessions.
+  // Each session is tagged with its source profile so MC can route it
+  // to the matching workspace.
+  const dbPaths = getAllHermesStateDbPaths()
+  if (dbPaths.length === 0) return []
 
-  let db: Database.Database | null = null
-  try {
-    db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  const now = Date.now()
+  const gatewayRunning = isHermesGatewayRunning()
+  const all: HermesSessionStats[] = []
 
-    // Verify the sessions table exists
-    const tableCheck = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
-    ).get() as { name?: string } | undefined
-    if (!tableCheck?.name) return []
+  for (const { path: dbPath, profile } of dbPaths) {
+    let db: Database.Database | null = null
+    try {
+      db = new Database(dbPath, { readonly: true, fileMustExist: true })
 
-    const rows = db.prepare(`
-      SELECT id, source, user_id, model, started_at, ended_at,
-             message_count, tool_call_count, input_tokens, output_tokens, title
-      FROM sessions
-      ORDER BY COALESCE(ended_at, started_at) DESC
-      LIMIT ?
-    `).all(limit) as HermesSessionRow[]
+      const tableCheck = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+      ).get() as { name?: string } | undefined
+      if (!tableCheck?.name) continue
 
-    const now = Date.now()
-    const gatewayRunning = isHermesGatewayRunning()
+      const rows = db.prepare(`
+        SELECT id, source, user_id, model, started_at, ended_at,
+               message_count, tool_call_count, input_tokens, output_tokens, title
+        FROM sessions
+        ORDER BY COALESCE(ended_at, started_at) DESC
+        LIMIT ?
+      `).all(limit) as HermesSessionRow[]
 
-    return rows.map((row) => {
-      const firstMessageAt = epochSecondsToISO(row.started_at)
-      let lastMessageAt = epochSecondsToISO(row.ended_at)
+      for (const row of rows) {
+        const firstMessageAt = epochSecondsToISO(row.started_at)
+        let lastMessageAt = epochSecondsToISO(row.ended_at)
 
-      // If session has no end time, try to get latest message timestamp
-      if (!lastMessageAt && row.started_at) {
-        try {
-          const latestMsg = db!.prepare(
-            'SELECT MAX(timestamp) as ts FROM messages WHERE session_id = ?'
-          ).get(row.id) as { ts: number | null } | undefined
-          if (latestMsg?.ts) {
-            lastMessageAt = epochSecondsToISO(latestMsg.ts)
-          }
-        } catch {
-          // messages table may not exist or have different schema
+        if (!lastMessageAt && row.started_at) {
+          try {
+            const latestMsg = db!.prepare(
+              'SELECT MAX(timestamp) as ts FROM messages WHERE session_id = ?'
+            ).get(row.id) as { ts: number | null } | undefined
+            if (latestMsg?.ts) lastMessageAt = epochSecondsToISO(latestMsg.ts)
+          } catch { /* messages table may not exist */ }
         }
+
+        if (!lastMessageAt) lastMessageAt = firstMessageAt
+
+        const lastMs = lastMessageAt ? new Date(lastMessageAt).getTime() : 0
+        const isActive = row.ended_at === null
+          && lastMs > 0
+          && (now - lastMs) < ACTIVE_THRESHOLD_MS
+          && gatewayRunning
+
+        all.push({
+          sessionId: row.id,
+          source: row.source || 'cli',
+          model: row.model || null,
+          title: row.title || null,
+          messageCount: row.message_count || 0,
+          toolCallCount: row.tool_call_count || 0,
+          inputTokens: row.input_tokens || 0,
+          outputTokens: row.output_tokens || 0,
+          firstMessageAt,
+          lastMessageAt,
+          isActive,
+          profile,
+        })
       }
-
-      if (!lastMessageAt) lastMessageAt = firstMessageAt
-
-      const lastMs = lastMessageAt ? new Date(lastMessageAt).getTime() : 0
-      const isActive = row.ended_at === null
-        && lastMs > 0
-        && (now - lastMs) < ACTIVE_THRESHOLD_MS
-        && gatewayRunning
-
-      return {
-        sessionId: row.id,
-        source: row.source || 'cli',
-        model: row.model || null,
-        title: row.title || null,
-        messageCount: row.message_count || 0,
-        toolCallCount: row.tool_call_count || 0,
-        inputTokens: row.input_tokens || 0,
-        outputTokens: row.output_tokens || 0,
-        firstMessageAt,
-        lastMessageAt,
-        isActive,
-      }
-    })
-  } catch (err) {
-    logger.warn({ err }, 'Failed to scan Hermes sessions')
-    return []
-  } finally {
-    try { db?.close() } catch { /* ignore */ }
+    } catch (err) {
+      logger.warn({ err, dbPath, profile }, 'Failed to scan Hermes profile')
+    } finally {
+      try { db?.close() } catch { /* ignore */ }
+    }
   }
+
+  // Sort newest-first across all profiles, then trim to limit.
+  all.sort((a, b) => {
+    const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0
+    const tb = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0
+    return tb - ta
+  })
+  return all.slice(0, limit)
 }
