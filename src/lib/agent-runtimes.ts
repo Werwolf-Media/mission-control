@@ -19,6 +19,37 @@ interface ScriptReviewResult {
 }
 
 /**
+ * Whitelist of trusted installer URL patterns. Critical-severity findings
+ * from the injection-guard regex scanner are downgraded to warnings for
+ * URLs on this list — these are official upstream installer scripts that
+ * legitimately use `curl | bash` patterns and would otherwise be blocked.
+ *
+ * Extend via MC_TRUSTED_INSTALLER_URLS env var (comma-separated regexes).
+ * Disable the regex block entirely with MC_TRUST_OFFICIAL_INSTALLERS=true.
+ * (Werwolf-Media fork patch)
+ */
+const TRUSTED_INSTALLER_URLS: RegExp[] = [
+  /^https:\/\/raw\.githubusercontent\.com\/NousResearch\/hermes-agent\//i,
+  /^https:\/\/raw\.githubusercontent\.com\/nousresearch\/hermes-agent\//i,
+  /^https:\/\/get\.openclaw\.dev/i,
+  /^https:\/\/raw\.githubusercontent\.com\/openclaw\//i,
+  /^https:\/\/install\.openclaw\.dev/i,
+  ...((process.env.MC_TRUSTED_INSTALLER_URLS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => {
+      try { return new RegExp(s) } catch { return null }
+    })
+    .filter((r): r is RegExp => r !== null)),
+]
+
+function isTrustedInstallerUrl(url: string): boolean {
+  if ((process.env.MC_TRUST_OFFICIAL_INSTALLERS || '').toLowerCase() === 'true') return true
+  return TRUSTED_INSTALLER_URLS.some(re => re.test(url))
+}
+
+/**
  * Download installer script to a secure temp dir, run regex-based injection
  * scan, and optionally request an AI security review via the Claude API.
  *
@@ -30,6 +61,11 @@ async function downloadAndReviewScript(
   job: InstallJob,
   env: NodeJS.ProcessEnv,
 ): Promise<{ scriptPath: string; tempDir: string } | null> {
+  const trusted = isTrustedInstallerUrl(url)
+  if (trusted) {
+    job.output += `> URL on trusted installer whitelist — critical regex findings will be warnings (not blocks).\n`
+  }
+
   // 1. Download to unpredictable temp dir (prevents symlink race)
   const tempDir = mkdtempSync(join(tmpdir(), 'mc-install-'))
   const scriptPath = join(tempDir, 'install.sh')
@@ -74,12 +110,24 @@ async function downloadAndReviewScript(
   if (!regexReport.safe) {
     const criticals = regexReport.matches.filter(m => m.severity === 'critical')
     if (criticals.length > 0) {
-      job.output += '> SECURITY: Downloaded script blocked by injection guard:\n'
-      for (const m of criticals) {
-        job.output += `>   [${m.rule}] ${m.description}: ${m.matched}\n`
+      if (trusted) {
+        // Werwolf-Media fork patch: trusted installer URLs proceed despite critical regex hits.
+        // Real-world installers (NousResearch, OpenClaw) legitimately use curl|bash style which
+        // upstream's regex flags. AI review (Patch 2) still runs and can block actual threats.
+        job.output += '> WARNING: Critical patterns found but URL is on trusted whitelist:\n'
+        for (const m of criticals) {
+          job.output += `>   [${m.rule}] ${m.description}: ${m.matched}\n`
+        }
+        job.output += '> Proceeding to AI review and execution.\n'
+      } else {
+        job.output += '> SECURITY: Downloaded script blocked by injection guard:\n'
+        for (const m of criticals) {
+          job.output += `>   [${m.rule}] ${m.description}: ${m.matched}\n`
+        }
+        job.output += '> If you trust this URL, add it via MC_TRUSTED_INSTALLER_URLS env var.\n'
+        rmSync(tempDir, { recursive: true, force: true })
+        return null
       }
-      rmSync(tempDir, { recursive: true, force: true })
-      return null
     }
   }
 
@@ -596,11 +644,35 @@ async function installOpenClawLocal(job: InstallJob): Promise<void> {
     CI: '1',
   }
   try {
-    // Download, review, then execute from secure temp dir
-    const reviewed = await downloadAndReviewScript('https://get.openclaw.dev', job, env)
+    // Werwolf-Media fork patch: try multiple installer URLs (get.openclaw.dev often DNS-fails).
+    // Override list via MC_OPENCLAW_INSTALLER_URLS env var (comma-separated).
+    const candidateUrls = (
+      process.env.MC_OPENCLAW_INSTALLER_URLS
+        ? process.env.MC_OPENCLAW_INSTALLER_URLS.split(',').map(s => s.trim()).filter(Boolean)
+        : [
+            'https://get.openclaw.dev',
+            'https://install.openclaw.dev',
+            'https://raw.githubusercontent.com/openclaw/openclaw/main/install.sh',
+          ]
+    )
+
+    let reviewed: { scriptPath: string; tempDir: string } | null = null
+    for (const url of candidateUrls) {
+      reviewed = await downloadAndReviewScript(url, job, env)
+      if (reviewed) {
+        job.output += `> Using installer from ${url}\n`
+        break
+      }
+      job.output += `> Falling back to next installer URL...\n`
+    }
+
     if (!reviewed) {
       job.status = 'failed'
-      job.error = 'Installer download or security review failed'
+      job.error = 'All installer URLs failed. Use the Docker sidecar pattern instead (see "Sidecar YAML" button) — ' +
+        'it pulls a prebuilt image and does not depend on get.openclaw.dev being reachable.'
+      job.output += '> All OpenClaw installer URLs failed.\n'
+      job.output += '> Recommended: use the Docker sidecar (click "Sidecar YAML" above) — it pulls a prebuilt\n'
+      job.output += '> image (Hostinger\'s hvps-openclaw) and avoids the broken installer entirely.\n'
       job.finishedAt = Date.now()
       return
     }
@@ -755,17 +827,28 @@ export function getActiveJobs(): InstallJob[] {
 
 export function generateDockerSidecar(runtime: RuntimeId): string {
   if (runtime === 'openclaw') {
-    return `  # OpenClaw Gateway sidecar
+    // Werwolf-Media fork patch:
+    //  - Fallback to Hostinger's hvps-openclaw build because openclaw/openclaw on GHCR
+    //    returns 404 and the documented URL was outdated.
+    //  - Documents that MC must also mount the volume to see sessions.
+    return `  # OpenClaw Gateway sidecar (Werwolf-Media fork — Hostinger-compatible image)
   openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: \${OPENCLAW_IMAGE:-ghcr.io/hostinger/hvps-openclaw:latest}
     container_name: openclaw-gateway
     ports:
       - "\${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN=\${OPENCLAW_GATEWAY_TOKEN:-}
+      - PORT=\${OPENCLAW_GATEWAY_PORT:-18789}
     volumes:
-      - openclaw-data:/root/.openclaw
+      - openclaw-data:/data
     networks:
       - mc-net
     restart: unless-stopped
+
+  # IMPORTANT: also mount the same volume in mission-control (read-only):
+  #   volumes:
+  #     - openclaw-data:/app/.data/.openclaw:ro
 
 # Add to volumes section:
 #   openclaw-data:`
@@ -777,18 +860,40 @@ export function generateDockerSidecar(runtime: RuntimeId): string {
 # then let Mission Control discover sessions from ~/.local/share/opencode.`
   }
 
-  return `  # Hermes Agent sidecar
+  // Hermes Agent — Werwolf-Media fork patch:
+  //  - Image: nousresearch/hermes-agent (docker.io) — ghcr.io/nousresearch returns 401
+  //  - Volume: /opt/data — Hermes' actual HERMES_HOME, not /root/.hermes
+  //  - Command: gateway run — otherwise container starts interactive TUI and exits
+  //  - Plus ENV vars Hermes actually reads (OPENROUTER_API_KEY, API_SERVER_KEY, dashboard)
+  //  - MC mounts same volume read-only at /app/.data/.hermes for session scanning
+  return `  # Hermes Agent sidecar (Werwolf-Media fork — verified working pattern)
   hermes-agent:
-    image: ghcr.io/nousresearch/hermes-agent:latest
+    image: nousresearch/hermes-agent:latest
     container_name: hermes-agent
+    command: ["gateway", "run"]
     environment:
       - MC_URL=http://mission-control:\${PORT:-3000}
       - MC_API_KEY=\${API_KEY:-}
+      - OPENROUTER_API_KEY=\${OPENROUTER_API_KEY:-}
+      - ANTHROPIC_API_KEY=\${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=\${OPENAI_API_KEY:-}
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=\${HERMES_API_SERVER_KEY:-}
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      - HERMES_DASHBOARD_INSECURE=1
+      - GATEWAY_ALLOW_ALL_USERS=true
     volumes:
-      - hermes-data:/root/.hermes
+      - hermes-data:/opt/data
     networks:
       - mc-net
     restart: unless-stopped
+
+  # IMPORTANT: also mount the same volume in mission-control (read-only):
+  #   volumes:
+  #     - hermes-data:/app/.data/.hermes:ro
 
 # Add to volumes section:
 #   hermes-data:`

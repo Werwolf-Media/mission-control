@@ -100,9 +100,28 @@ export function clearHermesDetectionCache(): void {
   hermesBinaryCache = null
 }
 
+/**
+ * Check if Hermes is "installed" from MC's perspective.
+ *
+ * Returns true when either:
+ *   1. The Hermes CLI binary exists on disk and responds to `--help` (classic local install)
+ *   2. A `state.db` exists at the expected path (Docker sidecar pattern, e.g. Hostinger
+ *      VPS-AI setup where `nousresearch/hermes-agent` runs in its own container and
+ *      shares /opt/data with MC via a named volume mounted at /app/.data/.hermes:ro).
+ *
+ * Upstream MC only checks (1), which breaks the documented sidecar pattern when MC
+ * itself doesn't have a Hermes binary installed. (Werwolf-Media fork patch)
+ */
 export function isHermesInstalled(): boolean {
-  // Strict detection: show Hermes UI only when Hermes CLI is actually installed on this system.
-  return hasHermesCliBinary()
+  return hasHermesCliBinary() || hasHermesStateDb()
+}
+
+function hasHermesStateDb(): boolean {
+  try {
+    return existsSync(getHermesDbPath())
+  } catch {
+    return false
+  }
 }
 
 function parseGatewayPid(raw: string): number | null {
