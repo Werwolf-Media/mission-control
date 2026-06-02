@@ -43,11 +43,37 @@ interface HermesSessionRow {
   title: string | null
 }
 
+/**
+ * Candidate paths where Hermes state files may live.
+ * Werwolf-Media fork patch: in Docker, HOME=/nonexistent so the upstream
+ * `homeDir`-only path never matches. We also check dataDir (where the
+ * sidecar volume is typically mounted to `/app/.data/.hermes`).
+ */
+function getHermesDataRoots(): string[] {
+  const path = require('node:path')
+  const dataDir = path.resolve(config.dataDir || '.data')
+  const homeDir = config.homeDir || process.env.HOME || ''
+  const roots = new Set<string>()
+  if (homeDir && homeDir !== '/nonexistent') roots.add(join(homeDir, '.hermes'))
+  roots.add(join(dataDir, '.hermes'))
+  if (process.env.HERMES_HOME) roots.add(process.env.HERMES_HOME)
+  return [...roots]
+}
+
 function getHermesDbPath(): string {
+  // Returns the first existing candidate, or the upstream-default for parity.
+  for (const root of getHermesDataRoots()) {
+    const p = join(root, 'state.db')
+    if (existsSync(p)) return p
+  }
   return join(config.homeDir, '.hermes', 'state.db')
 }
 
 function getHermesPidPath(): string {
+  for (const root of getHermesDataRoots()) {
+    const p = join(root, 'gateway.pid')
+    if (existsSync(p)) return p
+  }
   return join(config.homeDir, '.hermes', 'gateway.pid')
 }
 
@@ -117,11 +143,11 @@ export function isHermesInstalled(): boolean {
 }
 
 function hasHermesStateDb(): boolean {
-  try {
-    return existsSync(getHermesDbPath())
-  } catch {
-    return false
-  }
+  // Check all candidate roots, not just homeDir/.hermes (which is /nonexistent
+  // in default Docker setups). Werwolf-Media fork patch.
+  return getHermesDataRoots().some(root => {
+    try { return existsSync(join(root, 'state.db')) } catch { return false }
+  })
 }
 
 function parseGatewayPid(raw: string): number | null {
@@ -157,9 +183,21 @@ export function isHermesGatewayRunning(): boolean {
     const pidStr = readFileSync(pidPath, 'utf8')
     const pid = parseGatewayPid(pidStr)
     if (!pid) return false
-    // Check if process exists (signal 0 doesn't kill, just checks)
-    process.kill(pid, 0)
-    return true
+
+    // Try direct process check (works when Hermes runs in the same PID namespace
+    // as MC — i.e. classic local install).
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      // Werwolf-Media fork patch: in Docker sidecar setup MC and Hermes live in
+      // separate PID namespaces, so process.kill(pid, 0) always fails. Fall back
+      // to checking the gateway.lock file in the same dir — Hermes removes both
+      // pidfile and lockfile on graceful shutdown, so both-present is a strong
+      // "running" signal. False positives only on abrupt container kills.
+      const lockPath = join(require('node:path').dirname(pidPath), 'gateway.lock')
+      return existsSync(lockPath)
+    }
   } catch {
     return false
   }
