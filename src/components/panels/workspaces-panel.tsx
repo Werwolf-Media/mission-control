@@ -47,16 +47,13 @@ export function WorkspacesPanel() {
     setLoading(true)
     setError(null)
     try {
-      const wsRes = await apiFetch('/api/workspaces')
-      if (!wsRes.ok) throw new Error(`Workspaces ${wsRes.status}`)
-      const wsData = await wsRes.json() as { workspaces: Workspace[] }
+      const wsData = await apiFetch<{ workspaces: Workspace[] }>('/api/workspaces')
       const ws = (wsData.workspaces ?? []).slice().sort((a, b) => a.id - b.id)
       setWorkspaces(ws)
 
       // Fetch agents — single call, group client-side by workspace_id
-      const agRes = await apiFetch('/api/agents?limit=200')
-      if (agRes.ok) {
-        const agData = await agRes.json() as { agents: Agent[] }
+      try {
+        const agData = await apiFetch<{ agents: Agent[] }>('/api/agents?limit=200')
         const grouped: Record<number, Agent[]> = {}
         for (const a of agData.agents ?? []) {
           const wsId = a.workspace_id ?? 0
@@ -64,6 +61,8 @@ export function WorkspacesPanel() {
           grouped[wsId].push(a)
         }
         setAgentsByWorkspace(grouped)
+      } catch {
+        // non-critical
       }
     } catch (e: any) {
       setError(e?.message || 'Failed to load workspaces')

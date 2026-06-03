@@ -66,12 +66,13 @@ export function WorkspaceCreateModal({ onClose, onCreated }: Props) {
         body.initial_agents = Array.from(initialAgents)
       }
 
-      const res = await apiFetch('/api/workspaces', {
+      const res = await apiFetch<Response>('/api/workspaces', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        raw: true,
       })
-      const data = await res.json()
+      const data = await res.json() as any
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
 
       if (Array.isArray(data.provisioned) && data.provisioned.length > 0) {

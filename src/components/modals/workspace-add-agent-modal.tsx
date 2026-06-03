@@ -34,12 +34,13 @@ export function WorkspaceAddAgentModal({ workspace, onClose, onAdded }: Props) {
     setError(null)
     setSteps(null)
     try {
-      const res = await apiFetch(`/api/workspaces/${workspace.id}/agents`, {
+      const res = await apiFetch<Response>(`/api/workspaces/${workspace.id}/agents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role, provider_key: providerKey.trim() }),
+        raw: true,
       })
-      const data = await res.json()
+      const data = await res.json() as any
       if (!res.ok) {
         setSteps(Array.isArray(data.steps) ? data.steps : null)
         throw new Error(data?.error || `HTTP ${res.status}`)
