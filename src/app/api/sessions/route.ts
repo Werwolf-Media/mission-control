@@ -294,13 +294,30 @@ function getLocalHermesSessions() {
       for (const ws of wsRows) profileToWorkspace.set(ws.slug, ws)
     } catch { /* db lookup optional */ }
 
+    // Werwolf-Media fork patch (refined Patch 7): support "<workspace>-<role>"
+    // profile naming convention. Direct slug match wins; otherwise strip a
+    // trailing role suffix and try again.
+    const ROLE_SUFFIXES = ['coder', 'reviewer', 'tester', 'devops', 'researcher', 'assistant', 'agent']
+    function resolveWorkspace(profile: string) {
+      const direct = profileToWorkspace.get(profile)
+      if (direct) return direct
+      for (const role of ROLE_SUFFIXES) {
+        if (profile.endsWith('-' + role)) {
+          const candidate = profile.slice(0, -1 - role.length)
+          const ws = profileToWorkspace.get(candidate)
+          if (ws) return ws
+        }
+      }
+      return undefined
+    }
+
     return rows.map((s) => {
       const total = s.inputTokens + s.outputTokens
       const lastMsg = s.lastMessageAt ? new Date(s.lastMessageAt).getTime() : 0
       const firstMsg = s.firstMessageAt ? new Date(s.firstMessageAt).getTime() : 0
       const effectiveLastActivity = s.isActive ? Date.now() : lastMsg
       const profile = s.profile || 'default'
-      const ws = profileToWorkspace.get(profile)
+      const ws = resolveWorkspace(profile)
 
       // Build flags: include source + profile tag for UI filtering
       const flags: string[] = []
