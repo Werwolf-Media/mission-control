@@ -18,6 +18,8 @@ import { StandupPanel } from '@/components/panels/standup-panel'
 import { OrchestrationBar } from '@/components/panels/orchestration-bar'
 import { NotificationsPanel } from '@/components/panels/notifications-panel'
 import { UserManagementPanel } from '@/components/panels/user-management-panel'
+// Werwolf-Media fork Patch 9.3
+import { WorkspacesPanel } from '@/components/panels/workspaces-panel'
 import { AuditTrailPanel } from '@/components/panels/audit-trail-panel'
 import { WebhookPanel } from '@/components/panels/webhook-panel'
 import { SettingsPanel } from '@/components/panels/settings-panel'
@@ -597,6 +599,9 @@ function ContentRouter({ tab }: { tab: string }) {
       return <CostTrackerPanel />
     case 'users':
       return <UserManagementPanel />
+    // Werwolf-Media fork Patch 9.3
+    case 'workspaces':
+      return <WorkspacesPanel />
     case 'history':
     case 'activity':
       return <ActivityFeedPanel />

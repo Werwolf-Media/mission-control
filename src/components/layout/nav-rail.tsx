@@ -65,6 +65,8 @@ const navGroups: NavGroup[] = [
     id: 'admin',
     label: 'ADMIN',
     items: [
+      // Werwolf-Media fork Patch 9.3: Workspaces management
+      { id: 'workspaces', label: 'Workspaces', icon: <UsersIcon />, priority: false },
       { id: 'security', label: 'Security', icon: <SecurityIcon />, priority: false },
       { id: 'users', label: 'Users', icon: <UsersIcon />, priority: false },
       { id: 'audit', label: 'Audit', icon: <AuditIcon />, priority: false },
