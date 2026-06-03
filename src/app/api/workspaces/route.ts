@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import { listWorkspacesForTenant } from '@/lib/workspaces'
+import { provisionHermesAgent } from '@/lib/agent-provisioner'
 import { logger } from '@/lib/logger'
 
 export async function GET(request: NextRequest) {
@@ -70,7 +71,33 @@ export async function POST(request: NextRequest) {
       detail: { name: name.trim(), slug: resolvedSlug },
     })
 
-    return NextResponse.json({ workspace }, { status: 201 })
+    // Werwolf-Media fork Patch 9.2: optional initial agents.
+    // Body can include { provider_key, initial_agents: ['coder','reviewer',...] }
+    // For each role, provision a Hermes profile and register it as an agent
+    // bound to the freshly-created workspace.
+    const providerKey = typeof body?.provider_key === 'string' ? body.provider_key.trim() : ''
+    const initialRoles = Array.isArray(body?.initial_agents)
+      ? body.initial_agents.filter((r: any) => typeof r === 'string')
+      : []
+
+    const provisioned: Array<{ role: string; ok: boolean; agentId?: number; message: string }> = []
+    if (providerKey && initialRoles.length > 0) {
+      for (const role of initialRoles) {
+        try {
+          const res = await provisionHermesAgent({
+            workspaceSlug: resolvedSlug,
+            role,
+            providerKey,
+            actor: auth.user.username,
+          })
+          provisioned.push({ role, ok: res.ok, agentId: res.agentId, message: res.message })
+        } catch (err: any) {
+          provisioned.push({ role, ok: false, message: err?.message || 'provision error' })
+        }
+      }
+    }
+
+    return NextResponse.json({ workspace, provisioned }, { status: 201 })
   } catch (error) {
     logger.error({ err: error }, 'POST /api/workspaces error')
     return NextResponse.json({ error: 'Failed to create workspace' }, { status: 500 })

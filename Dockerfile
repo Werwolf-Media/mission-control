@@ -62,6 +62,15 @@ ENV NODE_ENV=production
 # curl, CA certs, python3, git needed for agent runtime installers (OpenClaw, Hermes)
 # procps provides `ps` and `uptime` used by system-monitor APIs
 RUN apt-get update && apt-get install -y curl ca-certificates python3 git make g++ procps --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
+# Werwolf-Media fork Patch 9.1: ship the Docker CLI so the app can call
+# `docker exec hermes-agent hermes profile create ...` for sidecar agent
+# provisioning. Static binary, ~80MB unpacked, no daemon dependency.
+# Activated when /var/run/docker.sock is mounted from the host.
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz \
+    | tar xz --strip-components=1 -C /usr/local/bin docker/docker \
+    && docker --version
+
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
