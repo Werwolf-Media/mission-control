@@ -301,6 +301,16 @@ function detectOpenClaw(): RuntimeStatus {
   let version: string | null = null
   let running = false
 
+  // Werwolf-Media fork Patch 10: detect Docker sidecar pattern.
+  // If OPENCLAW_GATEWAY_HOST points anywhere other than localhost,
+  // treat the gateway as an external sidecar that MC connects to.
+  // running=true is best-effort — full async HTTP probe would block here.
+  const gwHost = (process.env.OPENCLAW_GATEWAY_HOST || '').trim()
+  if (gwHost && gwHost !== '127.0.0.1' && gwHost !== 'localhost' && gwHost !== '::1') {
+    installed = true
+    running = true
+  }
+
   // Check config file existence
   if (config.openclawConfigPath && existsSync(config.openclawConfigPath)) {
     installed = true
