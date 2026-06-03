@@ -39,7 +39,7 @@ export function WorkspaceCreateModal({ onClose, onCreated }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [stepResults, setStepResults] = useState<Array<{ role: string; ok: boolean; message: string }> | null>(null)
 
-  const dialogRef = useFocusTrap<HTMLDivElement>(true)
+  const dialogRef = useFocusTrap(onClose)
 
   const effectiveSlug = slugManuallyEdited ? slug : slugify(name)
 

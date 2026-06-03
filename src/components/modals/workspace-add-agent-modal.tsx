@@ -27,7 +27,7 @@ export function WorkspaceAddAgentModal({ workspace, onClose, onAdded }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [steps, setSteps] = useState<Array<{ step: string; ok: boolean; detail?: string }> | null>(null)
 
-  const dialogRef = useFocusTrap<HTMLDivElement>(true)
+  const dialogRef = useFocusTrap(onClose)
 
   const submit = useCallback(async () => {
     setSubmitting(true)
