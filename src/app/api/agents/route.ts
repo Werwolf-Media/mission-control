@@ -24,8 +24,28 @@ export async function GET(request: NextRequest) {
   try {
     const db = getDatabase();
     const { searchParams } = new URL(request.url);
-    const workspaceId = auth.user.workspace_id ?? 1;
-    
+    const sessionWorkspaceId = auth.user.workspace_id ?? 1;
+
+    // Werwolf-Media fork Patch 11: allow admins to scope the query to any
+    // workspace (?workspace_id=N) or list across all of them
+    // (?all_workspaces=true). Viewers/operators stay limited to their own
+    // session workspace — the multi-tenant boundary is preserved for them.
+    const queryWorkspaceId = searchParams.get('workspace_id')
+    const allWorkspaces = searchParams.get('all_workspaces') === 'true'
+    const isAdmin = auth.user.role === 'admin'
+
+    let workspaceFilter: { mode: 'single' | 'all'; id?: number }
+    if (isAdmin && allWorkspaces) {
+      workspaceFilter = { mode: 'all' }
+    } else if (isAdmin && queryWorkspaceId) {
+      const requested = Number.parseInt(queryWorkspaceId, 10)
+      workspaceFilter = Number.isFinite(requested) && requested > 0
+        ? { mode: 'single', id: requested }
+        : { mode: 'single', id: sessionWorkspaceId }
+    } else {
+      workspaceFilter = { mode: 'single', id: sessionWorkspaceId }
+    }
+
     // Parse query parameters
     const status = searchParams.get('status');
     const role = searchParams.get('role');
@@ -33,9 +53,18 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200);
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    // Build dynamic query
-    let query = 'SELECT * FROM agents WHERE workspace_id = ?';
-    const params: any[] = [workspaceId];
+    // Build dynamic query — Patch 11: optional workspace scope
+    let query: string
+    const params: any[] = []
+    if (workspaceFilter.mode === 'all') {
+      query = 'SELECT * FROM agents WHERE 1=1'
+    } else {
+      query = 'SELECT * FROM agents WHERE workspace_id = ?'
+      params.push(workspaceFilter.id)
+    }
+
+    // Keep a single reference for the COUNT query / metadata
+    const workspaceId = workspaceFilter.mode === 'single' ? workspaceFilter.id! : sessionWorkspaceId;
 
     if (!showHidden) {
       query += ' AND hidden = 0';
