@@ -127,11 +127,38 @@ export async function DELETE(
 
     const fallbackId = defaultWs?.id ?? 1
 
+    // Werwolf-Media fork Patch 13: clean up the Hermes profiles that the
+    // workspace's agents represent before dropping the DB rows. Reading the
+    // ?keep_profiles=true query param leaves them in place (e.g. for a soft
+    // delete / move workflow).
+    const keepProfiles = new URL(request.url).searchParams.get('keep_profiles') === 'true'
+    const agentRows = db.prepare(
+      'SELECT id, name FROM agents WHERE workspace_id = ?'
+    ).all(workspaceId) as Array<{ id: number; name: string }>
+
+    const profileCleanup: Array<{ name: string; ok: boolean; detail?: string }> = []
+    if (!keepProfiles) {
+      const { deleteHermesProfile } = await import('@/lib/agent-provisioner')
+      for (const a of agentRows) {
+        try {
+          const r = await deleteHermesProfile({ profileName: a.name })
+          profileCleanup.push({ name: a.name, ok: r.ok, detail: r.message })
+        } catch (e: any) {
+          profileCleanup.push({ name: a.name, ok: false, detail: e?.message })
+        }
+      }
+    }
+
     db.transaction(() => {
-      // Reassign agents to default workspace
-      const moved = db.prepare(
-        'UPDATE agents SET workspace_id = ?, updated_at = ? WHERE workspace_id = ?'
-      ).run(fallbackId, Math.floor(Date.now() / 1000), workspaceId)
+      if (keepProfiles) {
+        // Reassign agents to default workspace (legacy behaviour)
+        db.prepare(
+          'UPDATE agents SET workspace_id = ?, updated_at = ? WHERE workspace_id = ?'
+        ).run(fallbackId, Math.floor(Date.now() / 1000), workspaceId)
+      } else {
+        // Delete agents whose Hermes profiles we just removed
+        db.prepare('DELETE FROM agents WHERE workspace_id = ?').run(workspaceId)
+      }
 
       // Reassign users to default workspace
       db.prepare(
@@ -155,8 +182,9 @@ export async function DELETE(
         detail: {
           name: existing.name,
           slug: existing.slug,
-          agents_moved: (moved as any).changes,
-          moved_to_workspace: fallbackId,
+          agents_count: agentRows.length,
+          profiles_removed: keepProfiles ? 0 : profileCleanup.filter(p => p.ok).length,
+          moved_to_workspace: keepProfiles ? fallbackId : null,
         },
       })
     })()
@@ -164,7 +192,9 @@ export async function DELETE(
     return NextResponse.json({
       success: true,
       deleted: existing.name,
-      agents_moved_to: fallbackId,
+      agents_count: agentRows.length,
+      profile_cleanup: keepProfiles ? null : profileCleanup,
+      agents_moved_to: keepProfiles ? fallbackId : null,
     })
   } catch (error) {
     logger.error({ err: error }, 'DELETE /api/workspaces/[id] error')

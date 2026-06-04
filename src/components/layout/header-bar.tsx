@@ -11,6 +11,8 @@ import { Button } from '@/components/ui/button'
 import { ThemeSelector } from '@/components/ui/theme-selector'
 import { LanguageSwitcher } from '@/components/ui/language-switcher'
 import { DigitalClock } from '@/components/ui/digital-clock'
+// Werwolf-Media fork Patch 12
+import { WorkspaceSwitcher } from '@/components/layout/workspace-switcher'
 import { getNavigationMetrics, navigationMetricEventName } from '@/lib/navigation-metrics'
 
 interface SearchResult {
@@ -320,6 +322,9 @@ export function HeaderBar() {
               <span className="font-medium text-foreground truncate max-w-[220px]">{activeTenant.display_name}</span>
             </div>
           ) : null}
+
+          {/* Werwolf-Media fork Patch 12: workspace dropdown for cross-tenant ops */}
+          <WorkspaceSwitcher />
 
           <ModeBadge connection={connection} onReconnect={reconnect} />
         </div>

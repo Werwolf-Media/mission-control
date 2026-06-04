@@ -274,6 +274,21 @@ export async function DELETE(
       logger.warn({ err, agent: agent.name }, 'Failed to remove OpenClaw agent config entry')
     }
 
+    // Werwolf-Media fork Patch 13: also remove the matching Hermes profile
+    // in the sidecar container. Best-effort — failures don't block the DB
+    // delete, but surface in the response so the operator can clean up by hand.
+    let hermesCleanup: { ok: boolean; message: string } | null = null
+    try {
+      const { deleteHermesProfile } = await import('@/lib/agent-provisioner')
+      hermesCleanup = await deleteHermesProfile({ profileName: agent.name })
+      if (!hermesCleanup.ok) {
+        logger.warn({ name: agent.name, msg: hermesCleanup.message }, 'Hermes profile delete failed during agent delete')
+      }
+    } catch (err: any) {
+      hermesCleanup = { ok: false, message: err?.message || 'profile delete failed' }
+      logger.warn({ err, agent: agent.name }, 'Hermes profile delete threw')
+    }
+
     db.prepare('DELETE FROM agents WHERE id = ? AND workspace_id = ?').run(agent.id, workspaceId)
 
     db_helpers.logActivity(
@@ -292,6 +307,7 @@ export async function DELETE(
       success: true,
       deleted: agent.name,
       remove_workspace: removeWorkspace,
+      hermes_cleanup: hermesCleanup,
       ...(configCleanupWarning ? { warning: configCleanupWarning } : {}),
     })
   } catch (error) {

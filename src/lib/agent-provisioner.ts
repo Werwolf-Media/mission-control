@@ -162,3 +162,46 @@ export async function provisionHermesAgent(
     steps,
   }
 }
+
+/**
+ * Delete a Hermes profile by name (sidecar) — Patch 13.
+ *
+ * Stops the per-profile gateway then runs `hermes profile delete --yes`.
+ * Safe to call for profiles that may not exist (returns ok=true so workspace
+ * cleanup proceeds even if a profile was already removed manually).
+ */
+export interface DeleteHermesProfileRequest {
+  profileName: string
+  hermesContainer?: string
+}
+
+export async function deleteHermesProfile(
+  req: DeleteHermesProfileRequest
+): Promise<{ ok: boolean; message: string }> {
+  const profile = (req.profileName || '').trim()
+  if (!profile || profile === 'default') {
+    return { ok: false, message: 'Refusing to delete the default profile' }
+  }
+  if (!NAME_RE.test(profile)) {
+    return { ok: false, message: `Invalid profile name: ${profile}` }
+  }
+  const container = req.hermesContainer || 'hermes-agent'
+
+  try {
+    // Stop the per-profile gateway (best-effort)
+    await runCommand('docker', ['exec', container, 'hermes', '-p', profile, 'gateway', 'stop'], { timeoutMs: 20_000 }).catch(() => undefined)
+
+    const r = await runCommand('docker', ['exec', container, 'hermes', 'profile', 'delete', profile, '--yes'], { timeoutMs: 60_000 })
+    if (r.code !== 0) {
+      const stderr = (r.stderr || '').toLowerCase()
+      // "no such profile" is fine — workspace cleanup already partially done
+      if (stderr.includes('not found') || stderr.includes('no such profile') || stderr.includes('does not exist')) {
+        return { ok: true, message: `Profile ${profile} already gone` }
+      }
+      return { ok: false, message: `Profile delete failed (exit ${r.code}): ${(r.stderr || r.stdout || '').slice(0, 200)}` }
+    }
+    return { ok: true, message: `Profile ${profile} deleted` }
+  } catch (err: any) {
+    return { ok: false, message: err?.message || 'docker exec failed' }
+  }
+}
