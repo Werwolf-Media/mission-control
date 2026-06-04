@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getUserFromRequest, requireRole } from '@/lib/auth'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import { logger } from '@/lib/logger'
-import { getMcSessionCookieName } from '@/lib/session-cookie'
+import { getMcSessionCookieName, isRequestSecure } from '@/lib/session-cookie'
 
 export async function POST(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Workspace not in your tenant' }, { status: 403 })
     }
 
-    const cookieName = getMcSessionCookieName()
+    const cookieName = getMcSessionCookieName(isRequestSecure(request))
     const token = request.cookies.get(cookieName)?.value
     if (!token) {
       // Without a session cookie we have nothing to update — the user is using
