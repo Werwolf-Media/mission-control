@@ -1428,6 +1428,21 @@ const migrations: Migration[] = [
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN signature TEXT DEFAULT NULL`)
       db.exec(`ALTER TABLE mcp_call_log ADD COLUMN public_key TEXT DEFAULT NULL`)
     }
+  },
+  {
+    // Werwolf-Media fork Patch 14.1: workspaces can be bound to a specific
+    // Hermes sidecar container. When NULL, agent provisioning falls back to
+    // the default 'hermes-agent' (MC's internal sidecar). When set, all
+    // provisioner operations (create/delete profile, set provider key,
+    // gateway restart) run against that container — so MC can manage agents
+    // inside per-customer hermes-workspace stacks.
+    id: '051_workspaces_hermes_container',
+    up(db: Database.Database) {
+      const cols = db.prepare(`PRAGMA table_info(workspaces)`).all() as Array<{ name: string }>
+      if (!cols.some(c => c.name === 'hermes_container')) {
+        db.exec(`ALTER TABLE workspaces ADD COLUMN hermes_container TEXT DEFAULT NULL`)
+      }
+    }
   }
 ]
 

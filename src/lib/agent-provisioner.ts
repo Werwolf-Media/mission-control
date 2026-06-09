@@ -60,18 +60,26 @@ export async function provisionHermesAgent(
     return { ok: false, message: 'Provider key must look like an API key (sk-…)', steps }
   }
 
-  const profile = `${req.workspaceSlug}-${req.role}`
-  const container = req.hermesContainer || 'hermes-agent'
   const keyEnv = req.providerKeyEnvVar || 'OPENROUTER_API_KEY'
 
-  // Look up workspace
+  // Look up workspace + its bound Hermes container (Patch 14.2)
   const db = getDatabase()
-  const ws = db.prepare('SELECT id, slug, name FROM workspaces WHERE slug = ?').get(req.workspaceSlug) as
-    | { id: number; slug: string; name: string }
+  const ws = db.prepare(
+    'SELECT id, slug, name, hermes_container FROM workspaces WHERE slug = ?'
+  ).get(req.workspaceSlug) as
+    | { id: number; slug: string; name: string; hermes_container: string | null }
     | undefined
   if (!ws) {
     return { ok: false, message: `Workspace not found: ${req.workspaceSlug}`, steps }
   }
+
+  // Container resolution order (Patch 14): explicit request > workspace binding > sidecar default.
+  // Customer-stack containers (customer-<slug>-hermes) host a single 'default' profile, so we
+  // skip "name-spacing" the profile with the workspace slug there — the customer only ever sees
+  // their own profile names.
+  const container = req.hermesContainer || ws.hermes_container || 'hermes-agent'
+  const isCustomerContainer = container !== 'hermes-agent'
+  const profile = isCustomerContainer ? req.role : `${req.workspaceSlug}-${req.role}`
 
   // ── Step 1: hermes profile create ───────────────────────────────────────
   try {
@@ -147,7 +155,13 @@ export async function provisionHermesAgent(
     logAuditEvent({
       action: 'agent.provisioned',
       actor: req.actor,
-      detail: JSON.stringify({ profile, role: req.role, workspace_slug: ws.slug, workspace_id: ws.id }),
+      detail: JSON.stringify({
+        profile,
+        role: req.role,
+        workspace_slug: ws.slug,
+        workspace_id: ws.id,
+        container,
+      }),
     })
   } catch (err: any) {
     log('db: agent insert', false, err?.message)
@@ -158,17 +172,21 @@ export async function provisionHermesAgent(
     ok: true,
     agentId,
     agentName: profile,
-    message: `Agent ${profile} provisioned in ${ws.name}`,
+    message: `Agent ${profile} provisioned in ${ws.name}${isCustomerContainer ? ` (customer container: ${container})` : ''}`,
     steps,
   }
 }
 
 /**
- * Delete a Hermes profile by name (sidecar) — Patch 13.
+ * Delete a Hermes profile by name (sidecar) — Patches 13 + 14.
  *
  * Stops the per-profile gateway then runs `hermes profile delete --yes`.
  * Safe to call for profiles that may not exist (returns ok=true so workspace
  * cleanup proceeds even if a profile was already removed manually).
+ *
+ * Patch 14: target container resolves from request override or, if the
+ * profile name follows the "<workspace-slug>-<role>" convention, from the
+ * matching workspace's hermes_container binding.
  */
 export interface DeleteHermesProfileRequest {
   profileName: string
@@ -185,22 +203,49 @@ export async function deleteHermesProfile(
   if (!NAME_RE.test(profile)) {
     return { ok: false, message: `Invalid profile name: ${profile}` }
   }
-  const container = req.hermesContainer || 'hermes-agent'
+
+  // Patch 14: figure out which container holds this profile.
+  let container = req.hermesContainer || ''
+  if (!container) {
+    try {
+      const db = getDatabase()
+      // Look for a workspace whose slug is a prefix of the profile name (e.g.
+      // 'digital-architekten' for profile 'digital-architekten-reviewer').
+      const wsRows = db.prepare(
+        'SELECT slug, hermes_container FROM workspaces WHERE hermes_container IS NOT NULL'
+      ).all() as Array<{ slug: string; hermes_container: string | null }>
+      const match = wsRows
+        .filter(w => w.hermes_container)
+        .sort((a, b) => b.slug.length - a.slug.length)
+        .find(w => profile === w.slug || profile.startsWith(w.slug + '-'))
+      if (match?.hermes_container) container = match.hermes_container
+    } catch { /* fall back to default */ }
+  }
+  if (!container) container = 'hermes-agent'
+
+  // In customer-stack containers the profile name is just the role (no
+  // workspace prefix), so strip the prefix if our caller still passed the
+  // fully-qualified MC convention.
+  let targetProfile = profile
+  if (container !== 'hermes-agent') {
+    const dash = profile.indexOf('-')
+    if (dash > 0) targetProfile = profile.slice(dash + 1)
+  }
 
   try {
     // Stop the per-profile gateway (best-effort)
-    await runCommand('docker', ['exec', container, 'hermes', '-p', profile, 'gateway', 'stop'], { timeoutMs: 20_000 }).catch(() => undefined)
+    await runCommand('docker', ['exec', container, 'hermes', '-p', targetProfile, 'gateway', 'stop'], { timeoutMs: 20_000 }).catch(() => undefined)
 
-    const r = await runCommand('docker', ['exec', container, 'hermes', 'profile', 'delete', profile, '--yes'], { timeoutMs: 60_000 })
+    const r = await runCommand('docker', ['exec', container, 'hermes', 'profile', 'delete', targetProfile, '--yes'], { timeoutMs: 60_000 })
     if (r.code !== 0) {
       const stderr = (r.stderr || '').toLowerCase()
       // "no such profile" is fine — workspace cleanup already partially done
       if (stderr.includes('not found') || stderr.includes('no such profile') || stderr.includes('does not exist')) {
-        return { ok: true, message: `Profile ${profile} already gone` }
+        return { ok: true, message: `Profile ${targetProfile} already gone (${container})` }
       }
-      return { ok: false, message: `Profile delete failed (exit ${r.code}): ${(r.stderr || r.stdout || '').slice(0, 200)}` }
+      return { ok: false, message: `Profile delete failed (exit ${r.code}, container=${container}): ${(r.stderr || r.stdout || '').slice(0, 200)}` }
     }
-    return { ok: true, message: `Profile ${profile} deleted` }
+    return { ok: true, message: `Profile ${targetProfile} deleted from ${container}` }
   } catch (err: any) {
     return { ok: false, message: err?.message || 'docker exec failed' }
   }

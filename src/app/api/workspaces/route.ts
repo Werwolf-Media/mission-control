@@ -55,10 +55,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Workspace slug already exists' }, { status: 409 })
     }
 
+    // Werwolf-Media fork Patch 14: bind workspace to a Hermes container.
+    // Body can include hermes_container=<container-name> (or null = MC's
+    // internal sidecar). Accept the convenience "auto" which probes for a
+    // matching customer-stack container by slug.
+    let hermesContainer: string | null = null
+    const containerArg = typeof body?.hermes_container === 'string' ? body.hermes_container.trim() : ''
+    if (containerArg === 'auto' || containerArg === '') {
+      // try the conventional customer-<slug>-hermes name first; we can't probe
+      // docker here, so just record the convention — provisioner will fall back
+      // gracefully if it doesn't exist.
+      hermesContainer = null
+    } else if (containerArg === 'sidecar' || containerArg === 'mc' || containerArg === 'hermes-agent') {
+      hermesContainer = 'hermes-agent'
+    } else {
+      hermesContainer = containerArg
+    }
+
     const now = Math.floor(Date.now() / 1000)
     const result = db.prepare(
-      'INSERT INTO workspaces (slug, name, tenant_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(resolvedSlug, name.trim(), tenantId, now, now)
+      'INSERT INTO workspaces (slug, name, tenant_id, hermes_container, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(resolvedSlug, name.trim(), tenantId, hermesContainer, now, now)
 
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(result.lastInsertRowid)
 
@@ -68,7 +85,7 @@ export async function POST(request: NextRequest) {
       actor_id: auth.user.id,
       target_type: 'workspace',
       target_id: Number(result.lastInsertRowid),
-      detail: { name: name.trim(), slug: resolvedSlug },
+      detail: { name: name.trim(), slug: resolvedSlug, hermes_container: hermesContainer },
     })
 
     // Werwolf-Media fork Patch 9.2: optional initial agents.

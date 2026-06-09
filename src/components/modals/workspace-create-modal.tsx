@@ -35,6 +35,7 @@ export function WorkspaceCreateModal({ onClose, onCreated }: Props) {
   const [slugManuallyEdited, setSlugManuallyEdited] = useState(false)
   const [providerKey, setProviderKey] = useState('')
   const [initialAgents, setInitialAgents] = useState<Set<string>>(new Set(['coder']))
+  const [hermesContainer, setHermesContainer] = useState('') // '' = MC sidecar, or custom name
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stepResults, setStepResults] = useState<Array<{ role: string; ok: boolean; message: string }> | null>(null)
@@ -64,6 +65,9 @@ export function WorkspaceCreateModal({ onClose, onCreated }: Props) {
       if (providerKey.trim()) body.provider_key = providerKey.trim()
       if (initialAgents.size > 0 && providerKey.trim()) {
         body.initial_agents = Array.from(initialAgents)
+      }
+      if (hermesContainer.trim()) {
+        body.hermes_container = hermesContainer.trim()
       }
 
       const res = await apiFetch<Response>('/api/workspaces', {
@@ -140,6 +144,27 @@ export function WorkspaceCreateModal({ onClose, onCreated }: Props) {
               autoComplete="off"
               spellCheck={false}
             />
+          </Field>
+
+          <Field label="Hermes container" hint="Where agents for this workspace live. Use a customer-stack container (e.g. customer-da-hermes) to provision into the customer's own dashboard; leave empty for MC's internal sidecar.">
+            <input
+              type="text"
+              value={hermesContainer}
+              onChange={(e) => setHermesContainer(e.target.value)}
+              placeholder="customer-XX-hermes  or  empty for MC sidecar"
+              className="w-full bg-surface-1 text-foreground border border-border rounded-md px-3 py-2 text-sm font-mono"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {effectiveSlug && !hermesContainer && (
+              <button
+                type="button"
+                onClick={() => setHermesContainer(`customer-${effectiveSlug.replace(/^kunde-/, '').replace(/^digital-architekten$/, 'da').replace(/^kunde-philipp-kahl$/, 'pk').replace(/^kunde-alexander-rast$/, 'ar')}-hermes`)}
+                className="text-xs text-emerald-400 hover:text-emerald-300 mt-1"
+              >
+                Use customer-{(effectiveSlug.length > 8 ? effectiveSlug.slice(0, 8) : effectiveSlug)}-hermes
+              </button>
+            )}
           </Field>
 
           <Field label="Initial agents" hint="Each becomes a Hermes profile with its own state.db">

@@ -69,11 +69,28 @@ export async function PUT(
       return NextResponse.json({ error: 'Workspace not found' }, { status: 404 })
     }
 
-    // Don't allow renaming the default workspace slug
+    // Werwolf-Media fork Patch 14: optionally update hermes_container.
+    // Pass null to unbind (back to MC's internal sidecar).
+    const containerArg = body?.hermes_container
+    let nextContainer: string | null | undefined
+    if (containerArg === null || containerArg === 'sidecar' || containerArg === 'mc' || containerArg === 'hermes-agent') {
+      nextContainer = null
+    } else if (typeof containerArg === 'string' && containerArg.trim().length > 0) {
+      nextContainer = containerArg.trim()
+    } else {
+      nextContainer = undefined // unchanged
+    }
+
     const now = Math.floor(Date.now() / 1000)
-    db.prepare(
-      'UPDATE workspaces SET name = ?, updated_at = ? WHERE id = ? AND tenant_id = ?'
-    ).run(name.trim(), now, Number(id), tenantId)
+    if (nextContainer === undefined) {
+      db.prepare(
+        'UPDATE workspaces SET name = ?, updated_at = ? WHERE id = ? AND tenant_id = ?'
+      ).run(name.trim(), now, Number(id), tenantId)
+    } else {
+      db.prepare(
+        'UPDATE workspaces SET name = ?, hermes_container = ?, updated_at = ? WHERE id = ? AND tenant_id = ?'
+      ).run(name.trim(), nextContainer, now, Number(id), tenantId)
+    }
 
     logAuditEvent({
       action: 'workspace_updated',
@@ -81,7 +98,12 @@ export async function PUT(
       actor_id: auth.user.id,
       target_type: 'workspace',
       target_id: Number(id),
-      detail: { old_name: existing.name, new_name: name.trim() },
+      detail: {
+        old_name: existing.name,
+        new_name: name.trim(),
+        old_container: existing.hermes_container,
+        new_container: nextContainer === undefined ? existing.hermes_container : nextContainer,
+      },
     })
 
     const updated = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(Number(id))
